@@ -1,215 +1,337 @@
 
-> 策略名称
+> Name
 
 FMEX简单排序挖矿机器人
 
-> 策略作者
+> Author
 
 小草
 
-> 策略描述
+> Strategy Description
 
-## 策略原理
+具体参考文章： https://www.fmz.com/digest-topic/5843
 
-**策略将会根据当前深度，自动寻找收益最大的挂单位置挂单，未被占用的位置优先，远离盘口优先。达到最大化资金利用。不同深度的挖矿效率可能相差百倍。**
-
-
-**每隔一段时间检查仓位，如果有持仓，每次按盘口价平固定数量（需要自己设置）的仓位，直到不持仓**
-
-**策略仅供学习参考，按需修改。管理仓位简单，未经长时间测试，欢迎反馈问题，不定期更新**
-
-**如用于实盘，需要修改参数里的基地址**
-
-排序挖矿机器人:  https://www.fmz.com/strategy/171042
-挂单挖矿机器人:  https://www.fmz.com/strategy/171258
-交易挖矿机器人:  https://www.fmz.com/strategy/171560
-
-FMZ已支持FMEX测试网，需要更新最新的托管者，等10月25号正式网上线后会自动切换。相关问题反馈：https://www.fmz.com/bbs-topic/4476
-
-## 问题和改进方向
-
-- 仓位管理较为简单，可自行修改。比如改为盘口挂单而不是直接吃单、累积到一定仓位再平等。
-- 挖矿系数可自行定义，如不想挂买一卖一，以及为了避免成交，向后的深度权重可以设置高一点。
-- 没有分散挂单，导致同策略的竞争。后期竞争较大时，可以改进一次挂多组订单。
-
-## 排序挖矿说明
-
-https://fcoin.zendesk.com/hc/zh-cn/articles/360037685493-FMex%E6%8E%92%E5%BA%8F%E6%8C%96%E7%9F%BF%E7%AE%97%E6%B3%95%E8%AF%B4%E6%98%8E
-
-排序挖矿全称为“挂单排序挖矿”，为了区别于已存在的“挂单挖矿”，故简称为排序挖矿。
- 
-
-定义每天中的每1分钟为一个排序挖矿周期，每个周期分配交易对当日排序挖矿额度的1/1440。
-
- 
-
-每个周期内，随机选取一个时间点，对该交易对买卖盘挂单情况做快照镜像，其中：
-
-买1 按用户挂单金额占比 分配该排序挖矿周期返还额度的1/4
-
-卖1 按用户挂单金额占比 分配该排序挖矿周期返还额度的1/4 
-
-买2到买11 这10档的挂单，按用户在每1档内的挂单金额占比 分别分配该排序挖矿周期返还额度的1/40
-
-卖2到卖11 这10档的挂单，按用户在每1档内的挂单金额占比 分别分配该排序挖矿周期返还额度的1/40
-
- 
-
-当日某用户在某交易对的排序挖矿的总返还，为用户在该交易对每个周期排序挖矿所获FMEX返还的总和。
-
- 
-
-补充说明：
-
-1. 必须是当天0点（GMT+8）之后的新挂单，才有参与当日排序挖矿的资格。
-
-2. 被排序挖矿快照到（每分钟随机一次）的挂单，如果已经部分成交，仍然按照全部订单金额计算。
-
-3. 排序挖矿和现有的交易挖矿、挂单挖矿并存，分别独立返还FMEX。一个订单在满足规则的情况下将可能同时享受多种挖矿返还。
-
-> 策略参数
+> Strategy Arguments
 
 
 
-|参数|默认值|描述|
+|Argument|Default|Description|
 |----|----|----|
 |Intervel|2|休眠时间|
 |Amount|10|下单量|
-|CoverAmount|2|每次平仓量|
-|CoverTime|60|检查仓位并平仓间隔|
+|CoverProfit|-10|平仓利润|
 |ProfitTime|60|打印收益时间间隔|
-|Url|https://api.testnet.fmex.com|API基地址|
+|Url|https://api.fmextest.net|API基地址|
 
 
-> 源码 (javascript)
+> Source (javascript)
 
 ``` javascript
-exchange.IO("base", Url) //切换基地址，方便切换实盘和模拟盘，实盘地址：https://api.fmex.com
+exchange.SetBase(Url)
+if(exchange.GetName()!= 'Futures_FMex'){
+    throw '此策略只支持FMEX永续'
+}
 
-var ordersInfo = {buyId:0, buyPrice:0, sellId:0, sellPrice:0}
-var depthInfo = {asks:[], bids:[]}
+var account = null
+var depth = null 
+var pos = {direction:'empty',price:0,amount:0,unrealised_profit:0}
+
+//官方的挖矿系数，可按需设置，如离盘口越远越大，减少成交风险
+var factors = [1/4, 1/40, 1/40,1/40,1/40,1/50,1/50,1/50,1/50,1/50,1/100,1/100,1/100,1/100,1/100]
+var total_efficiency = 0 //总效率
+var avg_efficiency = 0
+var avg_num = 0
+
+var ordersInfo = {buy:[],sell:[]}//id:0, price:0, amount:0}
+var coverInfo = {buyId:0, buyPrice:0, sellId:0, sellPrice:0}
+var depthInfo = []
 var lastProfitTime = 0 //控制打印收益时间
 var lastRestTime = Date.now()   //定时重置策略
-var lastCoverTime = Date.now()  //检查仓位并平仓
+var lastLogStatusTime = 0
+var lastPeriod = 0
+var today = _D().slice(8,11)
 
-function calcDepth(depth){ //计算最佳挂单位置
-    depthInfo = {asks:[], bids:[]}
-    var max_asks = 0
-    var max_bids = 0
+updateAccount()
+
+var total_back = 0
+if(_G('total_back')){
+    total_back = _G('total_back')
+}else{
+    _G('total_back',total_back)
+}
+var init_value = 0
+if(_G('init_value')){
+    init_value  = _G('init_value')
+}else{
+    init_value = _N(account.Info.data.BTC[0]+account.Info.data.BTC[1]+account.Info.data.BTC[2], 6)
+    Log('第一次启动策略, 始总价值为: ', init_value)
+    _G('init_value', init_value)
+}
+
+function updateDepth(){
+    var data = exchange.GetDepth()
+    if(data){
+        depth = data
+    }else{
+        Log('获取深度出错')
+    }
+}
+
+function updateAccount(){
+    var data = exchange.GetAccount()
+    if(data){
+        account = data
+    }else{
+        Log('获取账户出错')
+    }
+}
+
+function updatePosition(){
+    var data = exchange.GetPosition()
+    if(data){
+        if(data.length > 0){
+            if(data[0].Info.direction !=  pos.direction || data[0].Info.quantity != pos.amount){
+                Log('持仓变动：', pos.direction + ' ' +  pos.amount + ' -> ' + data[0].Info.direction + ' ' + data[0].Info.quantity)
+            }
+            pos = {direction:data[0].Info.direction, price:data[0].Info.entry_price, amount:data[0].Info.quantity, unrealised_profit:data[0].Info.unrealized_pnl}
+        }else{
+            if(pos.amount){
+                Log('持仓变动：', pos.direction + ' ' +  pos.amount + ' -> ' + 'empty')
+            }
+            pos = {direction:'empty',price:0,amount:0,unrealised_profit:0}
+        }
+    }else{
+        Log('获取持仓出错')
+    }
+}
+
+function calcDepth(){ 
+    depthInfo = [] // price amount efficent  ratio  
     var ask_price = depth.Asks[0].Price
     var bid_price = depth.Bids[0].Price
-    for(var i=0;i<11;i++){
-        var fact = i==0 ? 1/4 : 1/40 //官方的挖矿系数，可按需设置，如离盘口越远越大，减少成交风险
-        var my_ask_amount = depth.Asks[i].Price == ordersInfo.sellPrice ? Amount : 0 //排除掉自己订单的干扰
-        var my_bid_amount = depth.Bids[i].Price == ordersInfo.buyPrice ? Amount : 0
+    total_efficiency = 0
+    for(var i=0;i<15;i++){
+        var factor = factors[i]
+        total_efficiency += 1000000*(Amount*2/(depth.Asks[i].Amount+depth.Bids[i].Amount))*factor*0.5/288
         while(ask_price <= depth.Asks[i].Price){ //考虑到未被占用的深度位置
-            var ask_amount = ask_price == depth.Asks[i].Price ? depth.Asks[i].Amount : 0
-            var ratio = _N(10000*Amount*fact/Math.max(ask_amount+Amount-my_ask_amount,Amount),5) //避免因深度更新延时导致除0
-            depthInfo.asks.push(['sell_'+(i+1), ask_price, ask_amount, ratio])
-            if(ratio >= depthInfo.asks[max_asks][3]){max_asks = depthInfo.asks.length-1} //大于等于保证相同挖矿效率下远离盘口的优先
+            var my_ask_amount = _.findWhere(ordersInfo.sell, {price:ask_price}) ? _.findWhere(ordersInfo.sell, {price:ask_price}).amount : 0 //排除掉自己订单的干扰
+            var ask_amount = ask_price == depth.Asks[i].Price ? Math.max(depth.Asks[i].Amount-my_ask_amount,0) : 0
+            depthInfo.push({side:'sell', pos:i+1, price:ask_price, amount:ask_amount, factor:factor, my_amount:0, e:0, r:0})
             ask_price += 0.5
         }
+        
+    }
+    for(var i=0;i<15;i++){
+        var factor = factors[i]
+        total_efficiency += 1000000*(Amount*2/(depth.Asks[i].Amount+depth.Bids[i].Amount))*factor*0.5/288
         while(bid_price >= depth.Bids[i].Price){
-            var bid_amount = bid_price == depth.Bids[i].Price ? depth.Bids[i].Amount : 0
-            var ratio = _N(10000*Amount*fact/Math.max(bid_amount+Amount-my_bid_amount,Amount),5)
-            depthInfo.bids.push(['buy_'+(i+1), bid_price, bid_amount, ratio])
-            if(ratio >= depthInfo.bids[max_bids][3]){max_bids = depthInfo.bids.length-1}
+            var my_bid_amount = _.findWhere(ordersInfo.buy, {price:bid_price}) ? _.findWhere(ordersInfo.buy, {price:bid_price}).amount : 0 
+            var bid_amount = bid_price == depth.Bids[i].Price ? Math.max(depth.Bids[i].Amount-my_bid_amount,0) : 0
+            depthInfo.push({side:'buy', pos:i+1, price:bid_price, amount:bid_amount, factor:factor, my_amount:0, e:0, r:0})
             bid_price -= 0.5
         }
     }
-    return [depthInfo.asks[max_asks][1], depthInfo.bids[max_bids][1]]
 }
 
-function showTable(){
-    var table = {type: 'table', title: '挂单信息', cols: ['位置', '价格', '数量', '额度占比（万分之一）'], rows: []}
-    for(var i=0;i<depthInfo.asks.length;i++){
-        table.rows.push(depthInfo.asks[i])
+function calcAmount(){
+    var total_amount = Amount
+    var per_amount = _N(Amount/100,0)
+    var max_id = 0
+    while(total_amount >= per_amount){
+        var max_e = 0
+        for(var i=0;i<30;i++){
+            if(depthInfo[i].amount == 0){
+                depthInfo[i].my_amount = per_amount
+            }else{
+                depthInfo[i].e = depthInfo[i].factor*depthInfo[i].amount/Math.pow(depthInfo[i].my_amount+per_amount+depthInfo[i].amount,2)
+                max_id = depthInfo[i].e > max_e ? i : max_id 
+                max_e = depthInfo[i].e > max_e ? depthInfo[i].e : max_e
+            }
+        }
+        depthInfo[max_id].my_amount += per_amount     
+        total_amount -= per_amount
     }
-    for(var i=0;i<depthInfo.bids.length;i++){
-        table.rows.push(depthInfo.bids[i])
-    }
-    LogStatus('`' + JSON.stringify(table) + '`\n'+JSON.stringify(ordersInfo))
 }
 
-function reset(){ //重置策略，防止一些订单卡住，可能会影响其它正在运行的策略
+function makeOrders(){
+    var e = 0
+    var new_orders = {buy:[],sell:[]}
+    for(var i=0;i<30;i++){
+        if(depthInfo[i].my_amount > 0){
+            var find = _.findWhere(ordersInfo[depthInfo[i].side], {price:depthInfo[i].price})
+            //Log(find)
+            var now_amount = find ? find.amount : 0
+            var now_id =  find ? find.id : 0
+            if(Math.abs(now_amount  - depthInfo[i].my_amount) > 2.1*Amount/100 || depthInfo[i].amount == 0){ //需要重新下单
+                if(now_id){
+                    exchange.CancelOrder(now_id,find)
+                    find.id = 0
+                }
+                if(depthInfo[i].my_amount > 0){
+                    exchange.SetDirection(depthInfo[i].side)
+                    
+                    var id = exchange[depthInfo[i].side == 'buy'  ? 'Buy' :  'Sell'](depthInfo[i].price,depthInfo[i].my_amount)
+                    if(id){ 
+                        new_orders[depthInfo[i].side].push({price:depthInfo[i].price,amount:depthInfo[i].my_amount,id:id})
+                    }
+                }
+           }else{
+               now_id =  find ? find.id : 0
+               if(now_id){
+                   new_orders[depthInfo[i].side].push(find)
+               }
+           }
+           depthInfo[i].r = 1000000*(depthInfo[i].my_amount/(depthInfo[i].my_amount+depthInfo[i].amount))*depthInfo[i].factor*0.5/288
+           e += depthInfo[i].r
+        }
+    }
+    for(var i=0;i<ordersInfo.buy.length;i++){
+        if(ordersInfo.buy[i].price < depth.Bids[15].Price && ordersInfo.buy[i].id ){
+            exchange.CancelOrder(ordersInfo.buy[i].id,'撤销范围之外的买单')
+        }
+    }
+    for(var i=0;i<ordersInfo.sell.length;i++){
+        if(ordersInfo.sell[i].price > depth.Asks[15].Price && ordersInfo.sell[i].id){
+            exchange.CancelOrder(ordersInfo.sell[i].id,'撤销范围之外的卖单')
+        }
+    }
+    ordersInfo = new_orders
+    var total = avg_efficiency*avg_num + e
+    avg_num += 1
+    avg_efficiency = total/avg_num
+}
+
+function logStatus(){
+    if(Date.now()-lastLogStatusTime < 4000){
+        return
+    }
+    lastLogStatusTime = Date.now()
+    var leverage = pos.amount/(account.Info.data.BTC[0]*(depth.Asks[0].Price+depth.Bids[0].Price)/2)
+    var table1 = {type: 'table', title: '账户信息', 
+             cols: ['可用保证金', '冻结保证金', '持仓保证金',  '持仓方向','持仓张数', '持仓价格', '未实现盈亏', '已用杠杆', '初始资金', '收益', '平仓买价', '卖价','平均效率','我的效率'],
+             rows: [[_N(account.Info.data.BTC[0], 6),_N(account.Info.data.BTC[1], 6),_N(account.Info.data.BTC[2], 6),
+                     pos.direction,pos.amount,_N(pos.price,2),_N(pos.unrealised_profit,5),_N(leverage,2),
+                     _N(init_value,6),_N(account.Info.data.BTC[0]-init_value, 6), coverInfo.buyPrice, coverInfo.sellPrice,
+                     _N(total_efficiency/30,2),_N(avg_efficiency,2)
+                    ]]
+                 }
+    var table2 = {type: 'table', title: '挂单信息', cols: ['位置', '买价', '买量','我的', '效率', '卖价', '卖量', '我的', '效率'], rows: []}
+    
+    for(var i=0;i<15;i++){                          
+        table2.rows.push([i+1,depthInfo[i+15].price,depthInfo[i+15].amount,depthInfo[i+15].my_amount,_N(depthInfo[i+15].r,3),
+                          depthInfo[i].price,depthInfo[i].amount,depthInfo[i].my_amount,_N(depthInfo[i].r,3)])
+    }
+    if(_D().slice(8,11) != today){
+        today = _D().slice(8,11)
+        Log('昨天总解锁额度百万分之',total_back,'。今日重新统计')
+        total_back = 0
+    }
+    var nowPeriod = _N(_D().slice(14,16)/5,0)
+    if(lastPeriod != nowPeriod){
+        lastPeriod = nowPeriod 
+        total_back += avg_efficiency
+        avg_efficiency = 0
+        avg_num = 0
+        
+    }
+    var logString = '当前挖矿周期：'+_D().slice(11,14) + nowPeriod*5 + ' - ' + _D().slice(11,14) + (nowPeriod*5+5) + ' '+'排序挖矿已获得当日解锁总额度的百万分之'+ _N(total_back,4) +'\n'
+    LogStatus(logString + '`' + JSON.stringify(table1) + '`'+'\n'+'`' + JSON.stringify(table2) + '`')
+    if(Date.now()-lastProfitTime > ProfitTime*1000){
+        updateAccount()
+        lastProfitTime = Date.now()
+        LogProfit(_N(account.Info.data.BTC[0]+account.Info.data.BTC[1]+account.Info.data.BTC[2],6))
+    }
+}
+
+function cancelAll(){ //重置策略，防止一些订单卡住，可能会影响其它正在运行的策略
     var orders = exchange.GetOrders()
     if(orders){
         for(var i=0;i<orders.length;i++){
             exchange.CancelOrder(orders[i].Id)
         }
-        ordersInfo = {buyId:0, buyPrice:0, sellId:0, sellPrice:0}
+        ordersInfo = {buy:[],sell:[]}
+        coverInfo = {buyId:0, buyPrice:0, sellId:0, sellPrice:0} 
     }
 }
 
-function onexit(){  //退出后撤销订单
-    reset()
-}
 
-function cover(pos,depth){
-    if(pos.length>0){
-        if(pos[0].Type == 0){ //平多仓，采用盘口吃单，会损失手续费，可改为盘口挂单，会增加持仓风险。
-            exchange.SetDirection('sell')
-            var sellId = exchange.Sell(depth.Bids[0].Price, Math.min(CoverAmount, pos[0].Amount), '平多仓')
-            if(sellId){exchange.CancelOrder(sellId)} //平仓单会立即撤销
+function coverPosition(){
+    if(pos.amount>0){
+        if(pos.direction == 'long'){ //平多仓
+            var sellPrice = _N(pos.price,0)+_N(CoverProfit,0)
+            if(sellPrice != coverInfo.sellPrice){
+                if(coverInfo.sellId){
+                    exchange.CancelOrder(coverInfo.sellId)
+                    coverInfo.sellId = 0
+                }
+                exchange.SetDirection('sell')
+                var sellId = exchange.Sell(sellPrice, pos.amount, '平多仓')
+                coverInfo.sellPrice = sellPrice
+                if(sellId){
+                     coverInfo.sellId = sellId
+                }else{
+                     coverInfo.sellId = 0
+                }
+            }        
         }else{
-            exchange.SetDirection('buy')
-            var buyId = exchange.Buy(depth.Asks[0].Price, Math.min(CoverAmount, pos[0].Amount), '平空仓')
-            if(buyId){exchange.CancelOrder(buyId)}
-        }
-    }
-}
-
-function main() {
-    exchange.SetContractType('swap')
-    exchange.SetMarginLevel(0) //全仓模式
-    reset()
-    while(true){
-        var depth = _C(exchange.GetDepth)
-        var price = calcDepth(depth)
-        var sellPrice = price[0]
-        var buyPrice = price[1]
-        if(buyPrice != ordersInfo.buyPrice){
-            var cancelId = ordersInfo.buyId
-            exchange.SetDirection('buy')
-            var buyId = exchange.Buy(buyPrice, Amount)
-            ordersInfo.buyPrice = buyPrice
-            if(buyId){ordersInfo.buyId = buyId}else{ordersInfo.buyId = 0}
-            if(cancelId){exchange.CancelOrder(cancelId)} //先下单后撤单，保证始终有挂单
-        }
-        if(sellPrice != ordersInfo.sellPrice){
-            var cancelId = ordersInfo.sellId
-            exchange.SetDirection('sell')
-            var sellId = exchange.Sell(sellPrice, Amount)
-            ordersInfo.sellPrice = sellPrice
-            if(sellId){ordersInfo.sellId = sellId}else{ordersInfo.sellId = 0}
-            if(cancelId){exchange.CancelOrder(cancelId)}
-        }
-        if(Date.now()-lastProfitTime > ProfitTime*1000){
-            lastProfitTime = Date.now()
-            var account = exchange.GetAccount()
-            if(account){
-                LogProfit(_N(account.Info.data.BTC[0]+account.Info.data.BTC[1]+account.Info.data.BTC[2],6))
+            var buyPrice = _N(pos.price,0)-_N(CoverProfit,0)
+            if(buyPrice != coverInfo.buyPrice){
+                if(coverInfo.buyId){
+                    exchange.CancelOrder(coverInfo.buyId)
+                    coverInfo.buyId = 0
+                }
+                exchange.SetDirection('buy')
+                var buyId = exchange.Buy(buyPrice, pos.amount, '平空仓')
+                coverInfo.buyPrice = buyPrice
+                if(buyId){
+                     coverInfo.buyId = buyId
+                }else{
+                    coverInfo.buyId = 0
+                }
             }
         }
-        if(Date.now()-lastCoverTime > CoverTime*1000){
-            lastCoverTime = Date.now()
-            var pos = exchange.GetPosition()
-            if(pos){cover(pos,depth)}
-        }
-        if(Date.now()-lastRestTime > 10*60*1000){
-            lastRestTime = Date.now()
-            reset()
-        }
-        showTable()
+    }
+}
+
+function onTick(){
+    calcDepth()
+    calcAmount()
+    makeOrders()
+    if(Date.now()-lastRestTime > 3*60*1000){
+        lastRestTime = Date.now()
+        cancelAll()
+    }
+}
+
+
+function onexit(){  //退出后撤销订单
+    cancelAll()
+    _G('total_back',total_back)
+}
+
+
+exchange.SetContractType('swap')
+exchange.SetMarginLevel(0)
+
+
+
+function main() {
+    cancelAll()
+    while(true){
+        updatePosition()
+        updateDepth()
+        onTick()
+        coverPosition()
+        logStatus()
         Sleep(Intervel*1000)
     }
 }
 ```
 
-> 策略出处
+> Detail
 
 https://www.fmz.com/strategy/171042
 
-> 更新时间
+> Last Modified
 
-2019-12-09 11:15:15
+2020-09-25 15:34:00

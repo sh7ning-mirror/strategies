@@ -1,9 +1,9 @@
 
-> 策略名称
+> Name
 
 MACD画图范例
 
-> 策略作者
+> Author
 
 小小梦
 
@@ -11,7 +11,7 @@ MACD画图范例
 
 
 
-> 源码 (javascript)
+> Source (javascript)
 
 ``` javascript
 /*backtest
@@ -24,9 +24,6 @@ exchanges: [{"eid":"Futures_OKCoin","currency":"BTC_USD"}]
 var preTime = 0;
 var ChartObj = null;
 function main(){
-    // 测试
-    Log(aa.Last)   // 测试
-    
     LogReset(1);
     ChartObj = Chart(null);
     ChartObj.reset();
@@ -100,10 +97,10 @@ function main(){
 }
 ```
 
-> 策略出处
+> Detail
 
 https://www.fmz.com/strategy/151972
 
-> 更新时间
+> Last Modified
 
-2019-08-23 10:36:33
+2020-02-27 14:09:37
